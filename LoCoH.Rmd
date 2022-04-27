@@ -1,0 +1,241 @@
+---
+title: "LoCoH"
+author: "Kyle Dougherty"
+date: '2022-04-22'
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(parallel)
+```
+
+```{r}
+GPS_Data <- read_csv("./../PhD/Telemetry_Data/Data/Telemetry_Data/GPS_Data/GPS_Data.csv") %>%
+  filter(!is.na(LAT) &
+           !is.na(LONG)) %>%
+  st_as_sf(coords = c("LONG", "LAT"),
+           remove = FALSE,
+           crs = 4326)
+
+ACRP5 = GPS_Data %>% 
+  filter(ID == "ACRP5") %>%
+  st_transform(unique(.$CRS)) %>%
+  mutate(Max_Dist = max(as.numeric(st_distance(.))))
+```
+
+```{r eval = FALSE}
+a_LoCoH_HR <- function(data, iso_levels = c(0.95, 1), fill_holes, min_neighbors = 2){
+  
+  cl <- makeCluster(14)
+  clusterExport(cl, "data", envir = environment())
+  clusterEvalQ(cl, {
+    library(tidyverse)
+    library(sf)
+  })
+  
+  hulls = lapply(1:nrow(data), 
+                 function(row){
+                   
+                   # For each row in the dataset, calculate the distance
+                   # to each point
+                   nearest_neighbors = st_nearest_points(data[row,], 
+                                                         data) %>%
+                     st_sfc() %>%
+                     st_as_sf() %>%
+                     mutate(Distance = as.numeric(st_length(.))) %>%
+                     # Sort the dataframe by distance
+                     arrange(Distance) %>%
+                     ungroup() %>%
+                     # Calculate the cumulative distance and filter 
+                     # so that only rows where the cumulative distance
+                     # is less than "a" (the maximum distance between any 
+                     # two points in the dataset) are returned OR 
+                     # to meet the specified minimum number of nearest neighbors
+                     mutate(Cumulative_Distance = cumsum(Distance)) %>%
+                     filter(Cumulative_Distance <= data$Max_Dist | 
+                              row_number() <= 1 + min_neighbors)
+                   
+                   # Using those points, create the convex hull 
+                   # for the focal point and calculate the number
+                   # of points contained within the hull and the 
+                   # area of the hull
+                   hull = nearest_neighbors %>%
+                     st_cast("MULTIPOINT") %>%
+                     st_union() %>%
+                     st_convex_hull() %>%
+                     st_as_sf() %>%
+                     mutate(n_points = nrow(nearest_neighbors), 
+                            area = st_area(.))
+                   
+                 }) %>%
+    # Bind hulls into a single dataframe and arrange by the 
+    # number of points contained within the hull
+    bind_rows() %>%
+    arrange(desc(n_points))
+  
+  stopCluster(cl)
+  
+  # Starting with the hull containing the most number of points, 
+  # this loop will repeat until the number of points contained 
+  # within the union of the hulls is greater than the user defined
+  # iso_level. For example, if iso_level = 0.95, it will break the loop 
+  # when a percent of greater than 95% of points contained within the hull 
+  # is reached, and return the largest union of hulls with < 95% of points 
+  #contained
+  Isopleths = lapply(iso_levels, 
+                     function(iso_level){
+                       
+                       # If the iso_level is 1, return the 100% isopleth, 
+                       # otherwise get desired isopleth below
+                       if(iso_level == 1){
+                         
+                         Isopleth = hulls %>% 
+                           st_union() %>%
+                           st_as_sf() %>%
+                           mutate(n_contained = lengths(st_intersects(., data)),
+                                  percent = n_contained/nrow(data), 
+                                  iso_level = iso_level)
+                         
+                       }else{
+                         
+                         # Start the loop below with a value of 1, which corresponds 
+                         # to the hull with the largest amount of points contained 
+                         hull_index = 1
+                         
+                         repeat{
+                           
+                           # Create isopleth and test if greater than or 
+                           # equal to the defined iso_level
+                           test_isopleth = hulls %>% 
+                             head(hull_index) %>%
+                             st_union() %>%
+                             st_as_sf() %>%
+                             mutate(n_contained = lengths(st_intersects(., data)),
+                                    percent = n_contained/nrow(data), 
+                                    iso_level = iso_level)
+                           
+                           # Break the loop as described above
+                           if(test_isopleth$percent >= iso_level){
+                             break
+                           }
+                           
+                           # If test_isopleth percent is not greater than iso_level
+                           # set as new Isopleth and add 1 to hull_index to restart
+                           # the loop
+                           hull_index = hull_index + 1
+                           
+                           Isopleth = test_isopleth
+                           
+                         }
+                       }
+                       
+                       return(Isopleth)
+                       
+                     })
+  
+  # If the fill hole argument is TRUE,  
+  # fill_holes function with threshold and 
+  # recalculate HR area after filling holes 
+  if(fill_holes == TRUE){
+
+    Isopleths = Isopleths %>%
+      map_df(., ~.x %>%
+               mutate(ID = unique(data$ID)) %>%
+               sfheaders::sf_remove_holes() %>%
+               mutate(Area = st_area(.)) %>%
+               st_transform(4326))
+
+  } else{
+
+    Isopleths = Isopleths %>%
+      map_df(., ~.x %>%
+               mutate(ID = unique(data$ID),
+                      Area = st_area(.)) %>%
+               st_transform(4326))
+
+  }
+  # 
+  Isopleths
+}
+
+ACRP5_a_LoCoH_HR <- a_LoCoH_HR(ACRP5, 
+                               iso_level = c(0.95, 1), 
+                               min_neighbors = 2,
+                               fill_holes = TRUE)
+
+```
+
+```{r adehabitatHR, echo = FALSE, eval = FALSE}
+library(adehabitatHR)
+library(sp)
+library(rgeos)
+
+Subset = ACRP16 %>%
+  dplyr::select(ID, geometry)
+
+sp = as_Spatial(Subset)
+
+LoCoH <- LoCoH.a(sp, 
+                 unique(ACRP16$Max_Dist))
+
+LoCoH.95 <- getverticeshr(LoCoH, 
+                         percent = 95,
+                         unin = "m",
+                         unout = "km")
+
+LoCoH.1 <- getverticeshr(LoCoH, 
+                         percent = 100,
+                         unin = "m",
+                         unout = "km")
+plot(LoCoH.1)
+plot(LoCoH.95)
+```
+
+# 100% Isopleth
+```{r echo = FALSE, message=FALSE}
+# st_write(ACRP5_a_LoCoH_HR,
+#         "./../Public_Repository/Data/ACRP5_HR.shp")
+setwd("C:/Users/kdougherty8/OneDrive - University of Nebraska-Lincoln")
+
+ACRP5_a_LoCoH_HR <- st_read("Public_Repository/Data/ACRP5_HR.shp")
+
+
+tlocoh_1 <- st_read("PhD/Telemetry_Data/Data/Home_Range_Estimates/a_LoCoH_1_Isopleth")
+tlocoh_95 <- st_read("PhD/Telemetry_Data/Data/Home_Range_Estimates/a_LoCoH_0.95_Isopleth")
+
+Method_Comparison_100 <- ACRP5_a_LoCoH_HR %>%
+  filter(iso_lvl == 1) %>%
+  mutate(Method = "", 
+         Area = as.numeric(Area)) %>%
+  bind_rows(#st_as_sf(LoCoH.1) %>%
+             # mutate(Method = "adehabitatHR") %>%
+              #st_transform(4326), 
+            tlocoh_1 %>%
+              filter(ID == "ACRP5") %>%
+              mutate(Method = "tlocoh"))
+
+ggplot() + 
+  geom_sf(data = Method_Comparison_100) + 
+  facet_wrap(~Method)
+```
+
+# 95% Isopleth
+```{r echo = FALSE}
+Method_Comparison_95 <- ACRP5_a_LoCoH_HR %>%
+  filter(iso_lvl == 0.95) %>%
+  mutate(Method = "", 
+         Area = as.numeric(Area)) %>%
+  bind_rows(#st_as_sf(LoCoH.95) %>%
+             # mutate(Method = "adehabitatHR") %>%
+              #st_transform(4326), 
+            tlocoh_95 %>%
+              filter(ID == "ACRP5") %>%
+              mutate(Method = "tlocoh"))
+
+ggplot() + 
+  geom_sf(data = Method_Comparison_95) + 
+  facet_wrap(~Method)
+```
+
