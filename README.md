@@ -1,6 +1,9 @@
-Kyle Dougherty
-PhD Student in Benson Lab University of Nebraska Lincoln
-kyle.dougherty@huskers.unl.edu
+Kyle Dougherty <br />
+PhD Student in Benson Lab <br />
+University of Nebraska Lincoln
+
+Contact: <br />
+kyle.dougherty@huskers.unl.edu <br />
 kyle.duncan.dougherty@gmail.com
 
 <!---
