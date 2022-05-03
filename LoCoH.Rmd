@@ -25,6 +25,7 @@ ACRP5 = GPS_Data %>%
   mutate(Max_Dist = max(as.numeric(st_distance(.))))
 ```
 
+
 ```{r eval = FALSE}
 a_LoCoH_HR <- function(data, iso_levels = c(0.95, 1), fill_holes, min_neighbors = 2){
   
@@ -237,5 +238,299 @@ Method_Comparison_95 <- ACRP5_a_LoCoH_HR %>%
 ggplot() + 
   geom_sf(data = Method_Comparison_95) + 
   facet_wrap(~Method)
+```
+
+
+
+
+```{r}
+data = ACRP5
+min_neighbors = 2
+
+hulls = lapply(1,#:nrow(ACRP5), 
+               function(row){
+                 
+                 # For each row in the dataset, calculate the distance
+                 # to each point
+                 nearest_neighbors = st_nearest_points(data[row,], 
+                                                       data) %>%
+                   st_sfc() %>%
+                   st_as_sf() %>%
+                   mutate(Distance = as.numeric(st_length(.))) %>%
+                   # Sort the dataframe by distance
+                   arrange(Distance) %>%
+                   ungroup() %>%
+                   # Calculate the cumulative distance and filter 
+                   # so that only rows where the cumulative distance
+                   # is less than "a" (the maximum distance between any 
+                   # two points in the dataset) are returned OR 
+                   # to meet the specified minimum number of nearest neighbors
+                   mutate(Cumulative_Distance = cumsum(Distance)) %>%
+                   filter(Cumulative_Distance <= data$Max_Dist | 
+                            row_number() <= 1 + min_neighbors)
+                 
+                 # Using those points, create the convex hull 
+                 # for the focal point and calculate the number
+                 # of points contained within the hull and the 
+                 # area of the hull
+                 hull = nearest_neighbors %>%
+                   st_cast("MULTIPOINT") %>%
+                   st_union() %>%
+                   st_convex_hull() %>%
+                   st_as_sf() %>%
+                   mutate(n_points = nrow(nearest_neighbors), 
+                          area = st_area(.))
+                 
+               }) %>%
+  # Bind hulls into a single dataframe and arrange by the 
+  # number of points contained within the hull
+  bind_rows() %>%
+  arrange(desc(n_points))
+
+plot(hulls)
+```
+
+```{r}
+Pairwise_Distances = st_distance(ACRP5) %>%
+  as_tibble(rownames = "Index") %>%
+  mutate(across(everything(), 
+                as.numeric))
+
+
+Neighbors = lapply(1, 
+              function(row){
+                
+                nearest_neighbors = Pairwise_Distances %>%
+                  select(Index, Distance = deparse(row)) %>%
+                  arrange(Distance) %>%
+                  mutate(Cumulative_Distance = cumsum(Distance)) %>%
+                  filter(Cumulative_Distance <= data$Max_Dist | 
+                           row_number() <= 1 + min_neighbors) %>%
+                  pull(Index)
+                
+                # 
+                # 
+                # 
+                # hull = nearest_neighbors %>%
+                #    st_cast("MULTIPOINT") %>%
+                #    st_union() %>%
+                #    st_convex_hull() %>%
+                #    st_as_sf() %>%
+                #    mutate(n_points = nrow(nearest_neighbors),
+                #           area = st_area(.))
+                
+              })
+
+Test = ACRP5 %>%
+  filter(row_number() %in% Neighbors[[1]]) %>%
+     st_union() %>%
+     st_convex_hull() %>%
+     st_as_sf() %>%
+     mutate(n_points = length(Neighbors[[1]]),
+            area = st_area(.))
+
+
+plot(Test)
+
+
+```
+
+```{r}
+source("a_LoCoH_HR_Function.R")
+
+ACRP5 = GPS_Data %>% 
+  filter(ID == "ACRP5") %>%
+  st_transform(unique(.$CRS)) %>%
+  mutate(Max_Dist = max(as.numeric(st_distance(.))))
+
+Start = Sys.time()
+HR <- a_LoCoH_HR(data = ACRP5,
+           iso_levels = c(0.95, 1), 
+           fill_holes = TRUE, 
+           min_neighbors = 2)
+Sys.time() - Start
+```
+
+```{r}
+data = ACRP5
+min_neighbors = 2
+
+pairwise_distances = st_distance(data) %>%
+  as_tibble(rownames = "Row_Number") %>%
+  mutate(across(everything(), 
+                as.numeric))
+
+Start <- Sys.time()
+
+cl <- makeCluster(14)
+  clusterExport(cl, c("data", "pairwise_distances", "min_neighbors"), envir = environment())
+  clusterEvalQ(cl, {
+    library(tidyverse)
+    library(sf)
+  })
+
+hulls = parLapply(cl,
+                  1:nrow(data), 
+                  function(row){
+                    
+                    nearest_neighbors = pairwise_distances %>%
+                      select(Row_Number, Distance = as.character(row)) %>%
+                      arrange(Distance) %>%
+                      mutate(Cumulative_Distance = cumsum(Distance)) %>%
+                      filter(Cumulative_Distance <= data$Max_Dist | 
+                               row_number() <= 1 + min_neighbors) %>%
+                      pull(Row_Number)
+                    
+                    hull = data %>% 
+                      filter(row_number() %in% nearest_neighbors) %>%
+                      st_union() %>%
+                      st_convex_hull() %>%
+                      st_as_sf() %>%
+                      mutate(n_points = length(nearest_neighbors),
+                             area = st_area(.))
+                    
+                  }) %>%
+  # Bind hulls into a single dataframe and arrange by the 
+  # number of points contained within the hull
+  bind_rows() %>%
+  arrange(desc(n_points))
+
+stopCluster(cl)
+
+Sys.time() - Start
+```
+
+```{r}
+Isopleths = lapply(1, 
+                     function(iso_level){
+                       
+                       # If the iso_level is 1, return the 100% isopleth, 
+                       # otherwise get desired isopleth below
+                       if(iso_level == 1){
+                         
+                         Isopleth = hulls %>% 
+                           st_union() %>%
+                           st_as_sf() %>%
+                           mutate(n_contained = lengths(st_intersects(., data)),
+                                  percent = n_contained/nrow(data), 
+                                  iso_level = iso_level)
+                         
+                       }else{
+                         
+                         # Create an initial sequence of 20 hulls 
+                         initial_hull_numbers = floor(seq(1, nrow(data), length.out = 100))
+                         
+                         initial_hull_percentages = map_dbl(initial_hull_numbers,
+                                                           function(hull_index){ 
+                                                             
+                                                             hulls %>% 
+                                                               head(hull_index) %>%
+                                                               st_union() %>%
+                                                               st_as_sf() %>%
+                                                               mutate(n_contained = lengths(st_intersects(., data)),
+                                                                      percent = n_contained/nrow(data), 
+                                                                      iso_level = iso_level) %>%
+                                                               pull(percent)
+                                                           })
+                                                             
+                        hull_index = initial_hull_numbers[max(which(initial_hull_percentages < iso_level))]
+                        
+                         repeat{
+
+                           # Create isopleth and test if greater than or
+                           # equal to the defined iso_level
+                           test_isopleth = hulls %>%
+                             head(hull_index) %>%
+                             st_union() %>%
+                             st_as_sf() %>%
+                             mutate(n_contained = lengths(st_intersects(., data)),
+                                    percent = n_contained/nrow(data),
+                                    iso_level = iso_level)
+
+                           # Break the loop as described above
+                           if(test_isopleth$percent >= iso_level){
+                             break
+                           }
+
+                           # If test_isopleth percent is not greater than iso_level
+                           # set as new Isopleth and add 1 to hull_index to restart
+                           # the loop
+                           hull_index = hull_index + 1
+
+                           Isopleth = test_isopleth
+
+                         }
+                         
+                       }
+                       
+                       return(Isopleth)
+                       
+                     })
+
+plot(Isopleths[[1]])
+
+```
+
+
+
+
+```{r}
+iso_levels = 0.95
+
+Start <- Sys.time()
+
+Isopleths = lapply(iso_levels, 
+                     function(iso_level){
+                       
+                       # If the iso_level is 1, return the 100% isopleth, 
+                       # otherwise get desired isopleth below
+                       if(iso_level == 1){
+                         
+                         Isopleth = hulls %>% 
+                           st_union() %>%
+                           st_as_sf() %>%
+                           mutate(n_contained = lengths(st_intersects(., data)),
+                                  percent = n_contained/nrow(data), 
+                                  iso_level = iso_level)
+                         
+                       }else{
+                         
+                         # Start the loop below with a value of 1, which corresponds 
+                         # to the hull with the largest amount of points contained 
+                         hull_index = 1
+                         
+                         repeat{
+                           
+                           # Create isopleth and test if greater than or 
+                           # equal to the defined iso_level
+                           test_isopleth = hulls %>% 
+                             head(hull_index) %>%
+                             st_union() %>%
+                             st_as_sf() %>%
+                             mutate(n_contained = lengths(st_intersects(., data)),
+                                    percent = n_contained/nrow(data), 
+                                    iso_level = iso_level)
+                           
+                           # Break the loop as described above
+                           if(test_isopleth$percent >= iso_level){
+                             break
+                           }
+                           
+                           # If test_isopleth percent is not greater than iso_level
+                           # set as new Isopleth and add 1 to hull_index to restart
+                           # the loop
+                           hull_index = hull_index + 1
+                           
+                           Isopleth = test_isopleth
+                           
+                         }
+                       }
+                       
+                       return(Isopleth)
+                       
+                     })
+
+Sys.time() - Start
+
 ```
 
