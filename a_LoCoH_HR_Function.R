@@ -22,14 +22,11 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
   if(data_summary$Days_Tracked < min_days | 
      data_summary$n_Fixes < min_fixes){
     
-    messsage = paste("Insufficient data to estimate home range:", 
-          unique(data[[id]]),
-          "n Days =",
-          data_summary$Days_Tracked, 
-          "n Fixes = ", data_summary$n_Fixes, sep = " ")
-    
-    print(messsage)
-    return(message)
+    capture.output(paste("Insufficient data to estimate home range:", 
+                         unique(data[[id]]),
+                         "n Days =",
+                         data_summary$Days_Tracked, 
+                         "n Fixes = ", data_summary$n_Fixes, sep = " "))
     
     } else{
     
@@ -218,6 +215,7 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
                  mutate(ID = unique(data[[id]])) %>%
                  sfheaders::sf_remove_holes() %>%
                  mutate(Area = st_area(.)) %>%
+                 rename(geometry = x) %>%
                  st_transform(4326))
       
     } else{
@@ -226,6 +224,7 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
         map_df(., ~.x %>%
                  mutate(ID = unique(data[[id]]),
                         Area = st_area(.)) %>%
+                 rename(geometry = x) %>%
                  st_transform(4326))
       
     }
