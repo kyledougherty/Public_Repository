@@ -40,7 +40,8 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
     # Create a dataframe with the pairwise distance between 
     # each point in the telemetry data
     pairwise_distances = st_distance(data) %>%
-      as_tibble(rownames = "Row_Number") %>%
+      as_tibble(rownames = "Row_Number", 
+                .name_repair = ~paste0("V", .x)) %>%
       mutate(across(everything(), 
                     as.numeric))
     
@@ -50,7 +51,7 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
       select(-Row_Number) %>% max()
     
     # Set up parallelization:
-    # If running on linux/, will utilize FORK clusters which are 
+    # If running on linux/mac, will utilize FORK clusters which are 
     # faster to initialize and more memory efficient
     if(Sys.info()[["sysname"]] %in% c("Linux", "Darwin")){
       
@@ -83,7 +84,7 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
                         # for all points, select the row number and 
                         # column representing the distance to the focal point. 
                         nearest_neighbors = pairwise_distances %>%
-                          select(Row_Number, Distance = as.character(row)) %>%
+                          select(Row_Number, Distance = paste0("V", row)) %>%
                           # Arrange the dataframe by distance
                           arrange(Distance) %>%
                           # Calculate the cumulative distance and filter 
@@ -112,9 +113,11 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
                         
                       }) %>%
       # Bind hulls into a single dataframe and arrange by the 
-      # number of points contained within the hull
+      # number of points contained within the hull. If there is 
+      # a tie in the number of points contained within hulls, 
+      # they are arranged by area, from smallest to largest
       bind_rows() %>%
-      arrange(desc(n_points))
+      arrange(desc(n_points), area)
     
     stopCluster(cl)
     
@@ -147,9 +150,9 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
                            # 1 to the number of points in the dataset (also the number of hulls). 
                            # Using this sequence, calculate the percent of points contained within 
                            # each hull, then select an initial hull index value (the hull with the 
-                           # largest number of points contained that is less than the use defines iso
+                           # largest number of points contained that is less than the use defined iso
                            # level).
-                           initial_hull_numbers = round(seq(1, nrow(data), length.out = 100))
+                           initial_hull_numbers = unique(round(seq(1, nrow(data), length.out = 100)))
                            
                            hull_index = lapply(initial_hull_numbers,
                                                function(hull_index){ 
@@ -163,9 +166,9 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
                                                           iso_level = iso_level) 
                                                }) %>%
                              bind_rows(.id = "Index") %>%
-                             st_drop_geometry() %>%
                              filter(percent < iso_level) %>%
                              filter(percent == max(percent)) %>%
+                             filter(Index == max(Index)) %>%
                              pull(Index)
                            
                            hull_index = initial_hull_numbers[as.numeric(hull_index)]
