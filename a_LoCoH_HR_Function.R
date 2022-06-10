@@ -41,7 +41,7 @@ a_LoCoH_HR <- function(data, id = "ID", date = "DATE",
     # each point in the telemetry data
     pairwise_distances = st_distance(data) %>%
       as_tibble(rownames = "Row_Number", 
-                .name_repair = ~paste0("V", .x)) %>%
+                .name_repair = ~paste0("V", str_match_all(.x, "[0-9]+"))) %>%
       mutate(across(everything(), 
                     as.numeric))
     
